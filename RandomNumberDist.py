@@ -12,7 +12,7 @@ from qiskit_aer import AerSimulator
 def generate_random_number(start, end):
     """Generates a random number between start and end (inclusive)."""
     if start > end:
-        raise ValueError("Start must be less than or equal to end.")
+        raise ValueError("Start must be less than or equal   to end.")
     return random.randint(start, end)
 
 
@@ -121,17 +121,21 @@ def five_number_summary(dist: pd.Series, size: int) -> dict:
     # Tests for any systematic trend across the range (e.g. low numbers
     # appearing more than high numbers). For a truly uniform distribution
     # r should be close to 0.
+    from scipy import stats
     bin_indices = np.arange(len(v), dtype=float)
-    r = float(np.corrcoef(v, bin_indices)[0, 1])
+    reg = stats.linregress(bin_indices, v)
     return {
-        "Min":    int(v.min()),
-        "Q1":     float(np.percentile(v, 25)),
-        "Median": float(np.median(v)),
-        "Q3":     float(np.percentile(v, 75)),
-        "Max":    int(v.max()),
-        "Mean":   float(v.mean()),
-        "Std":    float(v.std()),
-        "r":      r,
+        "Min":       int(v.min()),
+        "Q1":        float(np.percentile(v, 25)),
+        "Median":    float(np.median(v)),
+        "Q3":        float(np.percentile(v, 75)),
+        "Max":       int(v.max()),
+        "Mean":      float(v.mean()),
+        "Std":       float(v.std()),
+        "r":         float(reg.rvalue),
+        "slope":     float(reg.slope),
+        "intercept": float(reg.intercept),
+        "slope_se":  float(reg.stderr),
     }
 
 
@@ -148,6 +152,8 @@ def add_summary_box(ax, summary: dict, expected: float, loc: str = "upper right"
         f"  Mean   {summary['Mean']:.1f}  (expected {expected:.0f})",
         f"  Std    {summary['Std']:.1f}",
         f"  r      {r_val:+.4f}  (counts vs index)",
+        f"  y = {summary['slope']:+.4f}x + {summary['intercept']:.2f}",
+        f"  SE(slope) = {summary['slope_se']:.4f}",
     ]
     text = "\n".join(lines)
     x = 0.99 if "right" in loc else 0.01
@@ -163,13 +169,14 @@ def add_summary_box(ax, summary: dict, expected: float, loc: str = "upper right"
 def plot_distribution(dist: pd.Series, title: str, size: int,
                       bar_color: str = "steelblue", save_path: str = None):
     """
-    Two-panel plot: frequency bars + residuals, with a five-number summary box.
+    Two-panel scatter plot: frequency + residuals, with a five-number summary box.
     Works for both classical and quantum distributions.
     """
-    expected  = size / len(dist)
-    residuals = dist - expected
-    summary   = five_number_summary(dist, size)
+    expected     = size / len(dist)
+    residuals    = dist - expected
+    summary      = five_number_summary(dist, size)
     std_expected = math.sqrt(expected * (1 - 1 / len(dist)))
+    xs           = dist.index.to_numpy()
 
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(14, 9), sharex=True,
@@ -177,37 +184,37 @@ def plot_distribution(dist: pd.Series, title: str, size: int,
     )
     fig.suptitle(title, fontsize=15, fontweight="bold", y=1.01)
 
-    # ── Top: frequency distribution ───────────────────────────────────────────
-    dist.plot(kind="bar", ax=ax1, color=bar_color, edgecolor="white", width=0.85)
-    ax1.axhline(expected, color="tomato", linewidth=1.4, linestyle="--",
-                label=f"Expected uniform ({expected:.0f}/bin)")
+    # ── Top: frequency scatter ────────────────────────────────────────────────
+    ax1.scatter(xs, dist.values, color=bar_color, s=40, zorder=3)
     ax1.set_ylabel("Frequency", fontsize=11)
     ax1.tick_params(axis="x", labelbottom=False)
-    ax1.legend(fontsize=9)
     ax1.spines[["top", "right"]].set_visible(False)
     add_summary_box(ax1, summary, expected, loc="upper right")
 
-    # Label each bar with its count, rotated vertically inside the bar
-    for patch, val in zip(ax1.patches, dist.values):
-        bar_height = patch.get_height()
-        ax1.text(
-            patch.get_x() + patch.get_width() / 2,  # horizontal center
-            bar_height * 0.5,                        # halfway up the bar
-            str(val),
-            ha="center", va="center",
-            fontsize=4.5, color="white", fontweight="bold",
-            rotation=90,
-        )
+    # Draw linear regression line on the frequency scatter
+    reg_xs   = np.array([xs.min(), xs.max()])
+    bin_idx  = np.arange(len(dist), dtype=float)
+    reg_ys   = summary["slope"] * np.array([0, len(dist) - 1]) + summary["intercept"]
+    ax1.plot(reg_xs, reg_ys, color="darkorange", linewidth=1.5,
+             linestyle="-", label=f"Regression  y = {summary['slope']:+.4f}x + {summary['intercept']:.2f}")
+    ax1.legend(fontsize=9)
 
-    # ── Bottom: residuals ─────────────────────────────────────────────────────
-    res_colors = [bar_color if v >= 0 else "tomato" for v in residuals]
-    ax2.bar(range(len(residuals)), residuals.values,
-            color=res_colors, edgecolor="white", width=0.85)
+    # Label each point with its count, offset just above the dot
+    for x, val in zip(xs, dist.values):
+        ax1.text(x, val + summary["Std"] * 0.25, str(val),
+                 ha="center", va="bottom", fontsize=5.5,
+                 color=bar_color, fontweight="bold")
+
+    # ── Bottom: residuals scatter ─────────────────────────────────────────────
+    res_vals   = residuals.values
+    res_colors = [bar_color if v >= 0 else "tomato" for v in res_vals]
+    ax2.scatter(xs, res_vals, color=res_colors, s=40, zorder=3)
+    ax2.vlines(xs, 0, res_vals, color=res_colors, alpha=0.4, linewidth=1)
     ax2.axhline(0, color="tomato", linewidth=1.4, linestyle="--")
     ax2.set_ylabel("Residual\n(Observed − Expected)", fontsize=10)
     ax2.set_xlabel("Number", fontsize=11)
-    ax2.set_xticks(range(len(dist)))
-    ax2.set_xticklabels(dist.index, fontsize=7, rotation=90)
+    ax2.set_xticks(xs)
+    ax2.set_xticklabels(xs, fontsize=7, rotation=90)
     ax2.spines[["top", "right"]].set_visible(False)
 
     ax2.text(0.99, 0.95,
@@ -226,7 +233,7 @@ def plot_distribution(dist: pd.Series, title: str, size: int,
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
 
-    START, END, SIZE = 1, 50, 100_000
+    START, END, SIZE = 1, 50, 10_000
 
     # ── Classical distribution ────────────────────────────────────────────────
     print("Generating classical distribution...")
