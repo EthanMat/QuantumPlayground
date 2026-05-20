@@ -117,31 +117,25 @@ def generate_distribution(start: int, end: int, size: int) -> pd.Series:
 def five_number_summary(dist: pd.Series, size: int) -> dict:
     """Return the five-number summary of the *bin counts* in dist."""
     v = dist.values
-    # Pearson r between observed counts and bin index (1..N).
-    # Tests for any systematic trend across the range (e.g. low numbers
-    # appearing more than high numbers). For a truly uniform distribution
-    # r should be close to 0.
     from scipy import stats
-    bin_indices = np.arange(len(v), dtype=float)
-    reg = stats.linregress(bin_indices, v)
+    expected = float(size) / len(v)
+    chi2, p = stats.chisquare(f_obs=v, f_exp=np.full_like(v, expected, dtype=float))
     return {
-        "Min":       int(v.min()),
-        "Q1":        float(np.percentile(v, 25)),
-        "Median":    float(np.median(v)),
-        "Q3":        float(np.percentile(v, 75)),
-        "Max":       int(v.max()),
-        "Mean":      float(v.mean()),
-        "Std":       float(v.std()),
-        "r":         float(reg.rvalue),
-        "slope":     float(reg.slope),
-        "intercept": float(reg.intercept),
-        "slope_se":  float(reg.stderr),
+        "Min":      int(v.min()),
+        "Q1":       float(np.percentile(v, 25)),
+        "Median":   float(np.median(v)),
+        "Q3":       float(np.percentile(v, 75)),
+        "Max":      int(v.max()),
+        "Mean":     float(v.mean()),
+        "Std":      float(v.std()),
+        "Chi2":     float(chi2),
+        "p":        float(p),
+        "dof":      int(len(v) - 1),
     }
 
 
 def add_summary_box(ax, summary: dict, expected: float, loc: str = "upper right"):
     """Overlay a five-number summary text box on ax."""
-    r_val = summary.get("r", float("nan"))
     lines = [
         "Five-Number Summary (bin counts)",
         f"  Min    {summary['Min']}",
@@ -151,9 +145,8 @@ def add_summary_box(ax, summary: dict, expected: float, loc: str = "upper right"
         f"  Max    {summary['Max']}",
         f"  Mean   {summary['Mean']:.1f}  (expected {expected:.0f})",
         f"  Std    {summary['Std']:.1f}",
-        f"  r      {r_val:+.4f}  (counts vs index)",
-        f"  y = {summary['slope']:+.4f}x + {summary['intercept']:.2f}",
-        f"  SE(slope) = {summary['slope_se']:.4f}",
+        f"  Chi2   {summary['Chi2']:.2f}  (df={summary['dof']})",
+        f"  p      {summary['p']:.3g}",
     ]
     text = "\n".join(lines)
     x = 0.99 if "right" in loc else 0.01
@@ -169,60 +162,43 @@ def add_summary_box(ax, summary: dict, expected: float, loc: str = "upper right"
 def plot_distribution(dist: pd.Series, title: str, size: int,
                       bar_color: str = "steelblue", save_path: str = None):
     """
-    Two-panel scatter plot: frequency + residuals, with a five-number summary box.
-    Works for both classical and quantum distributions.
+    Display a chi-squared table for a distribution and annotate the result.
     """
     expected     = size / len(dist)
-    residuals    = dist - expected
     summary      = five_number_summary(dist, size)
-    std_expected = math.sqrt(expected * (1 - 1 / len(dist)))
-    xs           = dist.index.to_numpy()
+    observed     = dist.values
+    expected_arr = np.full_like(observed, expected, dtype=float)
+    residuals    = observed - expected_arr
+    chi2_terms   = (residuals ** 2) / expected_arr
 
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(14, 9), sharex=True,
-        gridspec_kw={"height_ratios": [2, 1]}
+    labels = [str(x) for x in dist.index]
+    table_data = np.column_stack([
+        observed,
+        expected_arr,
+        residuals,
+        chi2_terms,
+    ])
+    col_labels = ["Observed", "Expected", "Residual", "Chi2 term"]
+
+    n_rows = len(dist)
+    fig_height = max(4, 0.28 * n_rows)
+    fig, ax = plt.subplots(figsize=(14, fig_height))
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=0.96)
+    ax.axis("off")
+
+    add_summary_box(ax, summary, expected, loc="upper right")
+
+    table = ax.table(
+        cellText=np.round(table_data, 2).tolist(),
+        rowLabels=labels,
+        colLabels=col_labels,
+        cellLoc="center",
+        rowLoc="center",
+        loc="center",
     )
-    fig.suptitle(title, fontsize=15, fontweight="bold", y=1.01)
-
-    # ── Top: frequency scatter ────────────────────────────────────────────────
-    ax1.scatter(xs, dist.values, color=bar_color, s=40, zorder=3)
-    ax1.set_ylabel("Frequency", fontsize=11)
-    ax1.tick_params(axis="x", labelbottom=False)
-    ax1.spines[["top", "right"]].set_visible(False)
-    add_summary_box(ax1, summary, expected, loc="upper right")
-
-    # Draw linear regression line on the frequency scatter
-    reg_xs   = np.array([xs.min(), xs.max()])
-    bin_idx  = np.arange(len(dist), dtype=float)
-    reg_ys   = summary["slope"] * np.array([0, len(dist) - 1]) + summary["intercept"]
-    ax1.plot(reg_xs, reg_ys, color="darkorange", linewidth=1.5,
-             linestyle="-", label=f"Regression  y = {summary['slope']:+.4f}x + {summary['intercept']:.2f}")
-    ax1.legend(fontsize=9)
-
-    # Label each point with its count, offset just above the dot
-    for x, val in zip(xs, dist.values):
-        ax1.text(x, val + summary["Std"] * 0.25, str(val),
-                 ha="center", va="bottom", fontsize=5.5,
-                 color=bar_color, fontweight="bold")
-
-    # ── Bottom: residuals scatter ─────────────────────────────────────────────
-    res_vals   = residuals.values
-    res_colors = [bar_color if v >= 0 else "tomato" for v in res_vals]
-    ax2.scatter(xs, res_vals, color=res_colors, s=40, zorder=3)
-    ax2.vlines(xs, 0, res_vals, color=res_colors, alpha=0.4, linewidth=1)
-    ax2.axhline(0, color="tomato", linewidth=1.4, linestyle="--")
-    ax2.set_ylabel("Residual\n(Observed − Expected)", fontsize=10)
-    ax2.set_xlabel("Number", fontsize=11)
-    ax2.set_xticks(xs)
-    ax2.set_xticklabels(xs, fontsize=7, rotation=90)
-    ax2.spines[["top", "right"]].set_visible(False)
-
-    ax2.text(0.99, 0.95,
-             f"Residual std={residuals.std():.1f}  (expected ~{std_expected:.1f})\n"
-             f"max={residuals.max():+.0f}  min={residuals.min():+.0f}",
-             transform=ax2.transAxes, fontsize=9, va="top", ha="right",
-             bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                       alpha=0.85, edgecolor="#cccccc"))
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.2)
 
     plt.tight_layout()
     if save_path:
